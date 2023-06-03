@@ -91,11 +91,10 @@ def model(neurons, X_train, Y_train, X_test, Y_test, num_iterations, learning_ra
     return parameters
 
 start = time.time()
-# Data shapes line up
-X_train = np.load('X_train_confirmed.npy') / 255
+# Load data 
+X_train = np.load('X_train_confirmed.npy') / 255 # divide by 255 to normalize pixel values between 0 and 1
 Y_train = np.load('Y_train_confirmed.npy')
 X_test = np.load('X_test_confirmed.npy') / 255
-print(X_test.shape)
 Y_test = np.load('Y_test_confirmed.npy')
 
 neurons = [64, 16, 1]
