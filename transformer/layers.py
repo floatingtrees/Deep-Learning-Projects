@@ -2,30 +2,51 @@ import numpy as np
 import pickle
 import time
 
-# matrix of word embeddings, use indexing to find the proper embedding
+# Make sure that necesary arrays are duplicated with ndarray.copy() 
 
 def softmax(x):
     x = np.exp(x)
     return x/np.sum(x)
 
 def relu(x):
-    return np.max(x, 0)
+    return np.maximum(x, 0) 
+
+def illegal_broadcast(x, desired_shape): # allows broadcasting when performing an operation that doesn't allow it (concat)
+    dummy = np.zeros(desired_shape, dtype = np.float32)
+    return x + dummy
+
+def uniform_initialize(*shape):
+    x = (np.random.rand(*shape) - 0.5) / 10
+    return x
+
+def xavier_initialize(*shape):
+    factor = 1
+    for i in shape:
+        factor *= i
+    limit = np.sqrt(6 / (factor))
+    x = (np.random.rand(*shape) - 0.5) * 2 * limit
+    return x
+
+
 
 class Embedding:
     def __init__(self, vocab_size, features, positional_features):
         self.vocab_size = vocab_size
         self.features = features
+        self.positional_features = positional_features
         
     def build(self, dummy_input):
-        self.weights = np.random.rand(vocab_size, features).astype(np.float32)
-        self.positional_embedding = np.random.rand(dummy_input.shape[-2], positional_features).astype(np.float32)
+        self.weights = uniform_initialize(self.vocab_size, self.features).astype(np.float32)
+        self.positional_embedding = uniform_initialize(dummy_input.shape[-1], self.positional_features).astype(np.float32)
 
     def call(self, inputs): # inputs is in shape (batch size, tokens)
         embedded_vectors = np.zeros((inputs.shape[0], inputs.shape[1], self.features))
         # pretty sure this works
         index = np.array(inputs)
         sequence = np.array(self.weights[index, :])
-        a = np.concatenate(sequence, self.positional_embedding, axis = -1)
+        
+        positional_sequence = illegal_broadcast(self.positional_embedding, sequence.shape)
+        a = np.concatenate((sequence, positional_sequence), axis = -1)
         self.a = a
         return a
 
@@ -39,15 +60,19 @@ class Dense:
         self.activation = activation
         
     def build(self, dummy_input):
-        self.weights = np.random.rand(dummy_input.shape[-1], neurons).astype(np.float32)
-        self.biases = np.zeros((1, neurons), dtype = np.float32)
+        self.weights = xavier_initialize(dummy_input.shape[-1], self.neurons).astype(np.float32)
+        self.biases = np.zeros((1, self.neurons), dtype = np.float32)
+
+    def build_with_shape(self, dummy_shape):
+        self.weights = xavier_initialize(dummy_shape[-1], self.neurons).astype(np.float32)
+        self.biases = np.zeros((1, self.neurons), dtype = np.float32)
 
     def call(self, inputs):
         z = np.matmul(inputs, self.weights) + self.biases
-        if self.activation == "softmax":
-            a = softmax(z)
-        elif self.activation == "relu":
+        if self.activation == "relu":
             a = relu(z)
+        elif self.activation == "softmax":
+            a = softmax(z)
         else:
             raise ValueError("Activation not found")
         self.a = a
@@ -55,13 +80,13 @@ class Dense:
 
 
 class BatchNorm:
-    def __init__(self, axis = -1, epsilon = 0.001):
+    def __init__(self, axis = (0, 1), epsilon = 0.00001):
         self.axis = axis
         self.epsilon = epsilon
 
     def build(self, dummy_input):
         self.samples = dummy_input.shape[0]
-        self.moving_average = np.mean(dummy_input, axis = self.axis) + self.eposilon
+        self.moving_average = np.mean(dummy_input, axis = self.axis) + self.epsilon
         self.moving_std = np.std(dummy_input, axis = self.axis) + self.epsilon
 
     def call(self, inputs):
@@ -83,20 +108,23 @@ class Dropout:
         self.dropout_rate = dropout_rate
         assert dropout_rate < 1, "unreasonable dropout rate: " + str(dropout_rate) # -1, 2
 
-    def build(self):
+    def build(self, dummy_input):
         pass
 
     def call(self, inputs, training = True):
         if training:
-            
-
+            mask = np.random.binomial(1, self.dropout_rate, inputs.shape)
+            return np.multiply(inputs, mask) * (1/self.dropout_rate)
+        else:
+            return inputs
 
 
 class AttentionHead:
-    def __init__(self):
-        self.query_layer = Dense()
-        self.key_layer = Dense()
-        self.value_layer = Dense()
+    def __init__(self, neurons):
+        self.neurons = neurons
+        self.query_layer = Dense(neurons)
+        self.key_layer = Dense(neurons)
+        self.value_layer = Dense(neurons)
 
     def build(self, dummy_q, dummy_k, dummy_v = None):
         if dummy_v == None:
@@ -106,12 +134,12 @@ class AttentionHead:
         self.value_layer.build(dummy_v)
 
     def call(self, query, key, value = None): # figure out what to store
-        q = np.matmul(query, self.query_layer)
-        k = np.matmul(key, self.key_layer)
+        q = self.query_layer.call(query)
+        k = self.key_layer.call(key)
         if value == None:
             v = k
         else:
-            v = np.matmul(value, self.value_layer)
+            v = self.value_layer.call(value)
 
         qk = np.matmul(q, np.swapaxes(k, -1, -2)) # transpose the matrix dimensions
         q_shape = q.shape
@@ -125,16 +153,32 @@ class AttentionHead:
 
 
 class MultiHeadAttention:
-    def __init__(self, num_heads):
+    def __init__(self, num_heads, head_dense_shape, final_dense_shape):
+        self.head_dense_shape = head_dense_shape
+        self.final_dense_shape = final_dense_shape
         self.heads = {}
-        self.Dense = Dense()
+        self.dense = Dense(final_dense_shape)
+        self.num_heads = num_heads
         for i in range(num_heads):
-            self.heads[i] = AttentionHead()
+            self.heads[i] = AttentionHead(head_dense_shape)
 
     def build(self, dummy_q, dummy_k, dummy_v = None):
-        for i in range(num_heads):
+        for i in range(self.num_heads):
             self.heads[i].build(dummy_q, dummy_k, dummy_v) 
-            self.Dense = 
+        self.dense.build_with_shape((dummy_q.shape[-2], self.num_heads * self.head_dense_shape)) # matmuls cancel out the shape
+
+    def call(self, q, k, v = None):
+        head_outputs = []
+        for i in range(self.num_heads):
+            x = self.heads[i].call(q, k, v)
+            if i == 0:
+                head_concat = x
+            else:
+                head_concat = np.concatenate((head_concat, x), axis = -1)
+
+        a = self.dense.call(head_concat)
+        return a
+
 
 
 
