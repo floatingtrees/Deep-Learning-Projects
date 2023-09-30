@@ -1,2 +1,2 @@
 # Deep-Learning-Projects
-Some machine learning projects that I've worked on
+My replications of common deep learning architectures in NumPy
