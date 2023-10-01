@@ -6,7 +6,8 @@ import time
 
 def softmax(x):
     x = np.exp(x)
-    return x/np.sum(x)
+    total = np.sum(x, axis = -1)
+    return x/total[..., np.newaxis] # have to explicity add axis to make broadcasting work
 
 def relu(x):
     return np.maximum(x, 0) 
@@ -34,8 +35,10 @@ class Embedding:
         self.vocab_size = vocab_size
         self.features = features
         self.positional_features = positional_features
+        self.concat_layer = Concat()
         
     def build(self, dummy_input):
+        self.concat_layer.build()
         self.weights = uniform_initialize(self.vocab_size, self.features).astype(np.float32)
         self.positional_embedding = uniform_initialize(dummy_input.shape[-1], self.positional_features).astype(np.float32)
 
@@ -46,8 +49,8 @@ class Embedding:
         sequence = np.array(self.weights[index, :])
         
         positional_sequence = illegal_broadcast(self.positional_embedding, sequence.shape)
-        a = np.concatenate((sequence, positional_sequence), axis = -1)
-        self.a = a
+        a = self.concat_layer.call((sequence, positional_sequence), axis = -1)
+        self.a = a.astype(np.float32)
         return a
 
     def backprop(self, grads):
@@ -103,6 +106,16 @@ class BatchNorm:
 
         return None # Fix for backprop
 
+
+class Concat:
+    def __init__(self):
+        pass 
+    def build(self):
+        pass
+    def call(self, inputs, axis = -1):
+        self.a = np.concatenate(inputs, axis)
+        return self.a
+
 class Dropout:
     def __init__(self, dropout_rate):
         self.dropout_rate = dropout_rate
@@ -119,6 +132,15 @@ class Dropout:
             return inputs
 
 
+class Flatten:
+    def __init__(self):
+        pass 
+    def build(self):
+        pass
+    def call(self, inputs):
+        self.a = np.reshape(inputs, (inputs.shape[0], -1))
+        return self.a
+
 class AttentionHead:
     def __init__(self, neurons):
         self.neurons = neurons
@@ -127,7 +149,7 @@ class AttentionHead:
         self.value_layer = Dense(neurons)
 
     def build(self, dummy_q, dummy_k, dummy_v = None):
-        if dummy_v == None:
+        if dummy_v is None:
             dummy_v = dummy_k
         self.query_layer.build(dummy_q)
         self.key_layer.build(dummy_k)
@@ -136,7 +158,7 @@ class AttentionHead:
     def call(self, query, key, value = None): # figure out what to store
         q = self.query_layer.call(query)
         k = self.key_layer.call(key)
-        if value == None:
+        if value is None:
             v = k
         else:
             v = self.value_layer.call(value)
@@ -157,13 +179,16 @@ class MultiHeadAttention:
         self.head_dense_shape = head_dense_shape
         self.final_dense_shape = final_dense_shape
         self.heads = {}
+        self.concat_layers = {}
         self.dense = Dense(final_dense_shape)
         self.num_heads = num_heads
         for i in range(num_heads):
+            self.concat_layers[i] = Concat()
             self.heads[i] = AttentionHead(head_dense_shape)
 
     def build(self, dummy_q, dummy_k, dummy_v = None):
         for i in range(self.num_heads):
+            self.concat_layers[i].build()
             self.heads[i].build(dummy_q, dummy_k, dummy_v) 
         self.dense.build_with_shape((dummy_q.shape[-2], self.num_heads * self.head_dense_shape)) # matmuls cancel out the shape
 
@@ -174,7 +199,7 @@ class MultiHeadAttention:
             if i == 0:
                 head_concat = x
             else:
-                head_concat = np.concatenate((head_concat, x), axis = -1)
+                head_concat = self.concat_layers[i].call((head_concat, x), axis = -1)
 
         a = self.dense.call(head_concat)
         return a
@@ -193,6 +218,4 @@ class MultiHeadAttention:
 
 
 
-class Model:
-    def __init__(self):
-        self.Dense1 = Dense(32, "relu")
+
