@@ -29,6 +29,14 @@ def xavier_initialize(*shape):
     return x
 
 
+def final_layer_initialize(*shape): # removes sqrt to prevent overflow
+    factor = 1
+    for i in shape:
+        factor *= i
+    limit = 6 / (factor)
+    x = (np.random.rand(*shape) - 0.5) * 2 * limit
+    return x
+
 
 class Embedding:
     def __init__(self, vocab_size, features, positional_features):
@@ -53,24 +61,34 @@ class Embedding:
         self.a = a.astype(np.float32)
         return a
 
-    def backprop(self, grads):
+    def compute_gradients(self, grads):
         pass
 
 
 class Dense:
-    def __init__(self, neurons, activation = "relu"):
+    def __init__(self, neurons, activation = "relu", final_layer = True):
         self.neurons = neurons
         self.activation = activation
+        self.final_layer = final_layer
         
     def build(self, dummy_input):
-        self.weights = xavier_initialize(dummy_input.shape[-1], self.neurons).astype(np.float32)
+        if not self.final_layer:
+            self.weights = xavier_initialize(dummy_input.shape[-1], self.neurons).astype(np.float32)
+        else:
+            self.weights = final_layer_initialize(dummy_input.shape[-1], self.neurons).astype(np.float32)
         self.biases = np.zeros((1, self.neurons), dtype = np.float32)
 
     def build_with_shape(self, dummy_shape):
-        self.weights = xavier_initialize(dummy_shape[-1], self.neurons).astype(np.float32)
+        if not self.final_layer:
+            self.weights = xavier_initialize(dummy_shape[-1], self.neurons).astype(np.float32)
+
+        else:
+            self.weights = final_layer_initialize(dummy_shape[-1], self.neurons).astype(np.float32)
+
         self.biases = np.zeros((1, self.neurons), dtype = np.float32)
 
     def call(self, inputs):
+        self.inputs = inputs
         z = np.matmul(inputs, self.weights) + self.biases
         if self.activation == "relu":
             a = relu(z)
@@ -80,6 +98,38 @@ class Dense:
             raise ValueError("Activation not found")
         self.a = a
         return a
+
+    def compute_gradients(self, previous_derivative):
+        if self.activation == "relu":
+            dadz = np.heaviside(self.a, 0)
+            dcdz = np.multiply(dadz, previous_derivative)
+            dzdb = 1
+            # Use different transpose commands because somehow there's no function that transposes only the 
+            # last dimensions 
+            if len(self.inputs.shape) == 2: 
+                dzdw = self.inputs.T
+            elif len(self.inputs.shape) == 3:
+                dzdw = np.transpose(self.inputs, (0, 2, 1))
+            else:
+                raise ValueError("Matrix has unsupported dimensions")
+
+            self.dcdw = np.matmul(previous_derivative, dcdz) / previous_derivative.shape[0]
+            self.dcdb = np.sum(dcdz, axis = 0) / dcdz.shape[0]
+
+        else: # For softmax
+            # I'm being a little lazy and treading the vector sum as a (value + constant)
+            # If training suffers serious issues and everything else works, investigate here
+            # Primary issue should be that if I don't account for the vector sum, incorrect options may increase 
+            # since there is no penalty keeping it down 
+            pass
+
+        dcda = np.matmul(dcdz, self.inputs) / dcda.shape[0]
+        return dcda
+
+    def update(self):
+        self.weights = self.weights + self.dcdw
+        self.biases = self.biases - dcda.shape[0]
+
 
 
 class BatchNorm:
@@ -93,18 +143,24 @@ class BatchNorm:
         self.moving_std = np.std(dummy_input, axis = self.axis) + self.epsilon
 
     def call(self, inputs):
+        self.inputs = inputs
         a = inputs - self.moving_average / self.moving_std
         self.a = a
         return a
 
-    def backprop(self):
+    def compute_gradients(self, previous_derivative):
+        dadx = self.a / self.moving_std # Don't calculate the std wrt to inputs
+        # Doesn't work unless you're using previous generation inputs as well, and that would just waste memory
+        self.dadc = dadx * previous_derivative
+
+        return dadc # Fix for backprop
+
+    def update(self): # 
         current_samples = a.shape[0]
         current_average = np.mean(a, axis = self.axis)
         current_std = np.std(a, axis = self.axis)
         self.moving_average = (self.moving_average * self.samples + current_average * current_samples) / (self.samples + current_samples) # might overflow
         self.moving_std = (self.moving_std * self.samples + current_std * current_samples) / (self.samples + current_samples) # might overflow
-
-        return None # Fix for backprop
 
 
 class Concat:
@@ -113,7 +169,9 @@ class Concat:
     def build(self):
         pass
     def call(self, inputs, axis = -1):
+        self.inputs = inputs
         self.a = np.concatenate(inputs, axis)
+        self.inputs = inputs
         return self.a
 
 class Dropout:
@@ -127,7 +185,8 @@ class Dropout:
     def call(self, inputs, training = True):
         if training:
             mask = np.random.binomial(1, self.dropout_rate, inputs.shape)
-            return np.multiply(inputs, mask) * (1/self.dropout_rate)
+            self.a = np.multiply(inputs, mask) * (1/self.dropout_rate)
+            return a
         else:
             return inputs
 
@@ -138,6 +197,7 @@ class Flatten:
     def build(self):
         pass
     def call(self, inputs):
+        self.inputs = inputs
         self.a = np.reshape(inputs, (inputs.shape[0], -1))
         return self.a
 
@@ -156,18 +216,21 @@ class AttentionHead:
         self.value_layer.build(dummy_v)
 
     def call(self, query, key, value = None): # figure out what to store
+        self.query = query 
+        self.key = key
+        if value is None:
+            value = key
+        self.value = value
+
         q = self.query_layer.call(query)
         k = self.key_layer.call(key)
-        if value is None:
-            v = k
-        else:
-            v = self.value_layer.call(value)
+        v = self.value_layer.call(value)
 
         qk = np.matmul(q, np.swapaxes(k, -1, -2)) # transpose the matrix dimensions
         q_shape = q.shape
         k_shape = k.shape
-        norm_factor = np.sqrt(q_shape[-1] * q_shape[-2] * k_shape[-1] * k_shape[-2])
-        qk = qk/norm_factor
+        self.norm_factor = np.sqrt(q_shape[-1] * q_shape[-2] * k_shape[-1] * k_shape[-2])
+        qk = qk/self.norm_factor
         qk = softmax(qk)
         a = np.matmul(qk, v)
 
@@ -193,6 +256,9 @@ class MultiHeadAttention:
         self.dense.build_with_shape((dummy_q.shape[-2], self.num_heads * self.head_dense_shape)) # matmuls cancel out the shape
 
     def call(self, q, k, v = None):
+        self.q = q 
+        self.k = k
+        self.v = v
         head_outputs = []
         for i in range(self.num_heads):
             x = self.heads[i].call(q, k, v)
