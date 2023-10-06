@@ -2,7 +2,7 @@ import numpy as np
 import pickle
 import time
 
-# Make sure that necesary arrays are duplicated with ndarray.copy() 
+# Make sure that necessary arrays are duplicated with ndarray.copy() 
 
 def softmax(x):
     x = np.exp(x)
